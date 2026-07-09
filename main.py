@@ -1,319 +1,643 @@
+import json
+
+import os
+
 import sqlite3
+
+import tempfile
+
 from datetime import datetime
-from pathlib import Path
+
+
+
+import aiosqlite
 
 from fastmcp import FastMCP
 
-# Create MCP Server
-mcp = FastMCP(name="Expense Tracker")
 
-# SQLite DB path
-DB_PATH = Path(__file__).parent / "expenses.db"
 
-# Allowed categories
-ALLOWED_CATEGORIES = [
-    "food",
-    "travel",
-    "shopping",
-    "rent",
-    "utilities",
-    "health",
-    "education",
-    "salary",
-    "business",
-    "entertainment",
-    "other",
+mcp = FastMCP(name="ExpenseTracker")
+
+
+
+# Remote platforms may not allow writing inside the project folder.
+
+# tempfile.gettempdir() usually gives a writable directory.
+
+TEMP_DIR = tempfile.gettempdir()
+
+DB_PATH = os.path.join(TEMP_DIR, "expenses.db")
+
+
+
+CATEGORIES = [
+
+    "Food & Dining",
+
+    "Transportation",
+
+    "Shopping",
+
+    "Entertainment",
+
+    "Bills & Utilities",
+
+    "Healthcare",
+
+    "Travel",
+
+    "Education",
+
+    "Business",
+
+    "Other",
+
 ]
 
 
-def get_connection():
-    """
-    Create SQLite database connection.
-    """
-    return sqlite3.connect(DB_PATH)
+
 
 
 def init_db():
+
     """
-    Create transactions table if it does not already exist.
-    This function is safe to call multiple times.
+
+    Initialize SQLite database.
+
+    Safe to call multiple times.
+
     """
-    with get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                type TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category TEXT NOT NULL,
-                description TEXT,
-                created_at TEXT NOT NULL
+
+    try:
+
+        with sqlite3.connect(DB_PATH) as conn:
+
+            conn.execute("PRAGMA journal_mode=WAL")
+
+            conn.execute(
+
+                """
+
+                CREATE TABLE IF NOT EXISTS expenses (
+
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    date TEXT NOT NULL,
+
+                    amount REAL NOT NULL,
+
+                    category TEXT NOT NULL,
+
+                    subcategory TEXT DEFAULT '',
+
+                    note TEXT DEFAULT '',
+
+                    created_at TEXT NOT NULL
+
+                )
+
+                """
+
             )
-            """
-        )
-        conn.commit()
+
+            conn.commit()
 
 
-def validate_category(category: str) -> str:
-    """
-    Validate category before inserting/updating data.
-    """
-    if not category:
-        raise ValueError("Category is required.")
 
-    category = category.lower().strip()
+        print(f"Database initialized successfully at: {DB_PATH}")
 
-    if category not in ALLOWED_CATEGORIES:
-        raise ValueError(
-            f"Invalid category '{category}'. "
-            f"Allowed categories are: {', '.join(ALLOWED_CATEGORIES)}"
-        )
 
-    return category
+
+    except Exception as exc:
+
+        print(f"Database initialization error: {exc}")
+
+        raise
+
+
+
 
 
 def validate_amount(amount: float) -> float:
+
     """
-    Validate amount before inserting/updating data.
+
+    Validate amount before saving.
+
     """
+
     if amount <= 0:
+
         raise ValueError("Amount must be greater than 0.")
 
     return amount
 
 
-@mcp.tool()
-def add_expense(amount: float, category: str, description: str = "") -> str:
+
+
+
+def validate_category(category: str) -> str:
+
     """
-    Add a new expense transaction.
+
+    Validate expense category.
+
+    """
+
+    if not category:
+
+        raise ValueError("Category is required.")
+
+
+
+    category = category.strip()
+
+
+
+    allowed_lower = {item.lower(): item for item in CATEGORIES}
+
+
+
+    if category.lower() not in allowed_lower:
+
+        raise ValueError(
+
+            f"Invalid category '{category}'. "
+
+            f"Allowed categories are: {', '.join(CATEGORIES)}"
+
+        )
+
+
+
+    return allowed_lower[category.lower()]
+
+
+
+
+
+def normalize_date(date: str) -> str:
+
+    """
+
+    Validate date format.
+
+    Expected format: YYYY-MM-DD
+
+    """
+
+    if not date:
+
+        return datetime.now().strftime("%Y-%m-%d")
+
+
+
+    try:
+
+        parsed = datetime.strptime(date, "%Y-%m-%d")
+
+        return parsed.strftime("%Y-%m-%d")
+
+    except ValueError:
+
+        raise ValueError("Date must be in YYYY-MM-DD format.")
+
+
+
+
+
+# Initialize database during startup
+
+init_db()
+
+
+
+
+
+@mcp.tool()
+
+async def add_expense(
+
+    date: str,
+
+    amount: float,
+
+    category: str,
+
+    subcategory: str = "",
+
+    note: str = "",
+
+) -> dict:
+
+    """
+
+    Add a new expense entry.
+
+
+
+    Use this when the user wants to record a spending transaction.
+
+
+
+    Required:
+
+    - date: YYYY-MM-DD
+
+    - amount: expense amount
+
+    - category: one of the allowed categories
+
+
 
     Example:
-    add_expense(25, "food", "Lunch at restaurant")
+
+    add_expense("2026-04-20", 25, "Food & Dining", "Lunch", "Lunch at office")
+
     """
+
     init_db()
+
+
+
+    date = normalize_date(date)
 
     amount = validate_amount(amount)
+
     category = validate_category(category)
-    description = description.strip() if description else ""
+
+    subcategory = subcategory.strip() if subcategory else ""
+
+    note = note.strip() if note else ""
+
     created_at = datetime.now().isoformat(timespec="seconds")
 
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO transactions (type, amount, category, description, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("expense", amount, category, description, created_at),
-        )
-        conn.commit()
 
-    return f"Expense added successfully with ID {cursor.lastrowid}."
+
+    try:
+
+        async with aiosqlite.connect(DB_PATH) as conn:
+
+            cursor = await conn.execute(
+
+                """
+
+                INSERT INTO expenses(date, amount, category, subcategory, note, created_at)
+
+                VALUES (?, ?, ?, ?, ?, ?)
+
+                """,
+
+                (date, amount, category, subcategory, note, created_at),
+
+            )
+
+            await conn.commit()
+
+
+
+            return {
+
+                "status": "success",
+
+                "id": cursor.lastrowid,
+
+                "message": "Expense added successfully.",
+
+                "database_path": DB_PATH,
+
+            }
+
+
+
+    except Exception as exc:
+
+        return {
+
+            "status": "error",
+
+            "message": f"Database error while adding expense: {str(exc)}",
+
+        }
+
+
+
 
 
 @mcp.tool()
-def add_credit(amount: float, category: str = "salary", description: str = "") -> str:
+
+async def list_expenses(start_date: str, end_date: str) -> list[dict] | dict:
+
     """
-    Add a credit/income transaction.
+
+    List expense entries within an inclusive date range.
+
+
 
     Example:
-    add_credit(5000, "salary", "Monthly salary")
+
+    list_expenses("2026-04-01", "2026-04-30")
+
     """
+
     init_db()
 
-    amount = validate_amount(amount)
-    category = validate_category(category)
-    description = description.strip() if description else ""
-    created_at = datetime.now().isoformat(timespec="seconds")
 
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO transactions (type, amount, category, description, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            ("credit", amount, category, description, created_at),
-        )
-        conn.commit()
 
-    return f"Credit added successfully with ID {cursor.lastrowid}."
+    start_date = normalize_date(start_date)
+
+    end_date = normalize_date(end_date)
+
+
+
+    try:
+
+        async with aiosqlite.connect(DB_PATH) as conn:
+
+            cursor = await conn.execute(
+
+                """
+
+                SELECT id, date, amount, category, subcategory, note, created_at
+
+                FROM expenses
+
+                WHERE date BETWEEN ? AND ?
+
+                ORDER BY date DESC, id DESC
+
+                """,
+
+                (start_date, end_date),
+
+            )
+
+
+
+            rows = await cursor.fetchall()
+
+            columns = [col[0] for col in cursor.description]
+
+
+
+            return [dict(zip(columns, row)) for row in rows]
+
+
+
+    except Exception as exc:
+
+        return {
+
+            "status": "error",
+
+            "message": f"Error listing expenses: {str(exc)}",
+
+        }
+
+
+
 
 
 @mcp.tool()
-def list_transactions(limit: int = 10) -> list[dict]:
+
+async def summarize(
+
+    start_date: str,
+
+    end_date: str,
+
+    category: str | None = None,
+
+) -> list[dict] | dict:
+
     """
-    List latest transactions.
+
+    Summarize expenses by category within an inclusive date range.
+
+
 
     Example:
-    list_transactions(5)
+
+    summarize("2026-04-01", "2026-04-30")
+
+    summarize("2026-04-01", "2026-04-30", "Food & Dining")
+
     """
+
     init_db()
 
-    if limit <= 0:
-        limit = 10
 
-    if limit > 100:
-        limit = 100
 
-    with get_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
+    start_date = normalize_date(start_date)
+
+    end_date = normalize_date(end_date)
+
+
+
+    try:
+
+        async with aiosqlite.connect(DB_PATH) as conn:
+
+            query = """
+
+                SELECT category, SUM(amount) AS total_amount, COUNT(*) AS count
+
+                FROM expenses
+
+                WHERE date BETWEEN ? AND ?
+
             """
-            SELECT id, type, amount, category, description, created_at
-            FROM transactions
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
 
-    return [dict(row) for row in rows]
+            params = [start_date, end_date]
+
+
+
+            if category:
+
+                category = validate_category(category)
+
+                query += " AND category = ?"
+
+                params.append(category)
+
+
+
+            query += " GROUP BY category ORDER BY total_amount DESC"
+
+
+
+            cursor = await conn.execute(query, params)
+
+            rows = await cursor.fetchall()
+
+            columns = [col[0] for col in cursor.description]
+
+
+
+            return [dict(zip(columns, row)) for row in rows]
+
+
+
+    except Exception as exc:
+
+        return {
+
+            "status": "error",
+
+            "message": f"Error summarizing expenses: {str(exc)}",
+
+        }
+
+
+
 
 
 @mcp.tool()
-def summarize_transactions() -> dict:
+
+async def delete_expense(expense_id: int) -> dict:
+
     """
-    Summarize total credit, total expense, available balance,
-    and category-wise summary.
+
+    Delete an expense by ID.
+
+
+
+    Use this only when the user clearly asks to delete an expense.
+
     """
+
     init_db()
 
-    with get_connection() as conn:
-        expense_total = conn.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0)
-            FROM transactions
-            WHERE type = 'expense'
-            """
-        ).fetchone()[0]
 
-        credit_total = conn.execute(
-            """
-            SELECT COALESCE(SUM(amount), 0)
-            FROM transactions
-            WHERE type = 'credit'
-            """
-        ).fetchone()[0]
 
-        category_rows = conn.execute(
-            """
-            SELECT category, type, COALESCE(SUM(amount), 0) AS total
-            FROM transactions
-            GROUP BY category, type
-            ORDER BY total DESC
-            """
-        ).fetchall()
+    if expense_id <= 0:
 
-    balance = credit_total - expense_total
+        raise ValueError("expense_id must be greater than 0.")
+
+
+
+    try:
+
+        async with aiosqlite.connect(DB_PATH) as conn:
+
+            cursor = await conn.execute(
+
+                """
+
+                DELETE FROM expenses
+
+                WHERE id = ?
+
+                """,
+
+                (expense_id,),
+
+            )
+
+            await conn.commit()
+
+
+
+            if cursor.rowcount == 0:
+
+                return {
+
+                    "status": "not_found",
+
+                    "message": f"No expense found with ID {expense_id}.",
+
+                }
+
+
+
+            return {
+
+                "status": "success",
+
+                "message": f"Expense {expense_id} deleted successfully.",
+
+            }
+
+
+
+    except Exception as exc:
+
+        return {
+
+            "status": "error",
+
+            "message": f"Error deleting expense: {str(exc)}",
+
+        }
+
+
+
+
+
+@mcp.tool()
+
+def list_categories() -> list[str]:
+
+    """
+
+    List allowed expense categories.
+
+    """
+
+    return CATEGORIES
+
+
+
+
+
+@mcp.tool()
+
+def get_database_location() -> dict:
+
+    """
+
+    Show where the SQLite database is stored.
+
+    Useful for debugging remote deployments.
+
+    """
+
+    init_db()
 
     return {
-        "total_credit": credit_total,
-        "total_expense": expense_total,
-        "balance": balance,
-        "category_summary": [
-            {
-                "category": row[0],
-                "type": row[1],
-                "total": row[2],
-            }
-            for row in category_rows
-        ],
+
+        "database_path": DB_PATH,
+
+        "note": (
+
+            "This path may be temporary in cloud deployments. "
+
+            "Use PostgreSQL/MySQL for production persistence."
+
+        ),
+
     }
 
 
-@mcp.tool()
-def edit_transaction(
-    transaction_id: int,
-    amount: float,
-    category: str,
-    description: str = "",
-) -> str:
+
+
+
+@mcp.resource("expense:///categories", mime_type="application/json")
+
+def categories() -> str:
+
     """
-    Edit an existing transaction by ID.
 
-    Example:
-    edit_transaction(1, 30, "food", "Updated lunch amount")
+    Return allowed categories as JSON resource.
+
     """
-    init_db()
 
-    if transaction_id <= 0:
-        raise ValueError("Transaction ID must be greater than 0.")
-
-    amount = validate_amount(amount)
-    category = validate_category(category)
-    description = description.strip() if description else ""
-
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            UPDATE transactions
-            SET amount = ?, category = ?, description = ?
-            WHERE id = ?
-            """,
-            (amount, category, description, transaction_id),
-        )
-        conn.commit()
-
-    if cursor.rowcount == 0:
-        return f"No transaction found with ID {transaction_id}."
-
-    return f"Transaction {transaction_id} updated successfully."
+    return json.dumps({"categories": CATEGORIES}, indent=2)
 
 
-@mcp.tool()
-def delete_transaction(transaction_id: int) -> str:
-    """
-    Delete a transaction by ID.
 
-    Example:
-    delete_transaction(1)
-    """
-    init_db()
-
-    if transaction_id <= 0:
-        raise ValueError("Transaction ID must be greater than 0.")
-
-    with get_connection() as conn:
-        cursor = conn.execute(
-            """
-            DELETE FROM transactions
-            WHERE id = ?
-            """,
-            (transaction_id,),
-        )
-        conn.commit()
-
-    if cursor.rowcount == 0:
-        return f"No transaction found with ID {transaction_id}."
-
-    return f"Transaction {transaction_id} deleted successfully."
-
-
-@mcp.tool()
-def list_categories() -> list[str]:
-    """
-    List allowed transaction categories.
-    """
-    return ALLOWED_CATEGORIES
-
-
-@mcp.tool()
-def get_database_location() -> str:
-    """
-    Show the local SQLite database file location.
-    Useful for debugging.
-    """
-    init_db()
-    return str(DB_PATH)
-
-
-@mcp.resource("expense://categories")
-def expense_categories() -> str:
-    """
-    Provide allowed expense categories as a resource.
-    """
-    return "\n".join(ALLOWED_CATEGORIES)
 
 
 if __name__ == "__main__":
-    init_db()
-    mcp.run()
+
+    mcp.run(transport="http", host="0.0.0.0", port=8000)
